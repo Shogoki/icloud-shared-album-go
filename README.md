@@ -1,7 +1,12 @@
-# Go iCloud Album
+# Go iCloud Shared Album
 
 A Go implementation for fetching and processing iCloud Shared Album data.
 Heavily inspired by https://github.com/ghostops/ICloud-Shared-Album
+
+This repository contains:
+- **Go Module**: Core library for iCloud Shared Album access (`icloud.go`, `types.go`)
+- **REST API**: HTTP API server for easy web integration (`./api/`)
+- **Example**: Command-line usage example (`./example/`)
 
 ## Installation
 
@@ -60,6 +65,31 @@ The package provides several types to work with the iCloud Shared Album API:
 - `Derivative`: Contains information about different versions of an image
 - `Metadata`: Contains album metadata
 
+## REST API
+
+A complete REST API server is available in the `./api/` directory, providing HTTP endpoints for easy web integration.
+
+**Quick Start:**
+```bash
+cd api
+go run main.go
+# API available at http://localhost:8000
+```
+
+**Example Request:**
+```bash
+curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
+```
+
+**Docker Support:**
+```bash
+cd api
+make docker-build
+make docker-run
+```
+
+📖 **[See complete API documentation →](./api/README.md)**
+
 ## Example
 
-See the `example` directory for a complete working example.
+See the `example` directory for a complete working example of the Go module usage.
