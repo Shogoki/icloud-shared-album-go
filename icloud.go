@@ -32,17 +32,20 @@ func NewClient() *Client {
 // GetImages retrieves images from an iCloud shared album
 func (c *Client) GetImages(token string) (*Response, error) {
 	baseURL := getBaseURL(token)
+	fmt.Printf("Initial baseURL: %s\n", baseURL)
 	
 	// Handle potential redirects (added in 2024)
 	redirectedBaseURL, err := c.getRedirectedBaseURL(baseURL, token)
 	if err != nil {
 		return nil, fmt.Errorf("getting redirected base URL: %w", err)
 	}
+	fmt.Printf("Redirected baseURL: %s\n", redirectedBaseURL)
 
 	apiResponse, err := c.getAPIResponse(redirectedBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("getting API response: %w", err)
 	}
+	fmt.Printf("Got API response with %d photos\n", len(apiResponse.PhotoGUIDs))
 
 	allURLs := make(map[string]string)
 	for i := 0; i < len(apiResponse.PhotoGUIDs); i += chunkSize {
@@ -52,18 +55,26 @@ func (c *Client) GetImages(token string) (*Response, error) {
 		}
 		chunk := apiResponse.PhotoGUIDs[i:end]
 
+		fmt.Printf("Getting URLs for chunk %d-%d of %d photos\n", i, end, len(apiResponse.PhotoGUIDs))
 		urls, err := c.getURLs(redirectedBaseURL, chunk)
 		if err != nil {
 			return nil, fmt.Errorf("getting URLs for chunk: %w", err)
 		}
+		fmt.Printf("Got %d URLs for chunk\n", len(urls))
+
 		for k, v := range urls {
 			allURLs[k] = v
+			fmt.Printf("URL for %s: %s\n", k, v)
 		}
 	}
 
+	fmt.Printf("Total URLs collected: %d\n", len(allURLs))
+	enrichedPhotos := enrichImagesWithURLs(apiResponse, allURLs)
+	fmt.Printf("Enriched %d photos with URLs\n", len(enrichedPhotos))
+
 	return &Response{
 		Metadata: apiResponse.Metadata,
-		Photos:   enrichImagesWithURLs(apiResponse, allURLs),
+		Photos:   enrichedPhotos,
 	}, nil
 }
 
@@ -173,6 +184,14 @@ func parseDate(date string) time.Time {
 }
 
 func (c *Client) getAPIResponse(baseURL string) (*APIResponse, error) {
+	return c.getAPIResponseWithRetry(baseURL, 0)
+}
+
+func (c *Client) getAPIResponseWithRetry(baseURL string, retryCount int) (*APIResponse, error) {
+	if retryCount > 2 {
+		return nil, fmt.Errorf("too many redirects")
+	}
+
 	url := fmt.Sprintf("%s/webstream", baseURL)
 	fmt.Printf("Requesting URL: %s\n", url)
 
@@ -208,6 +227,34 @@ func (c *Client) getAPIResponse(baseURL string) (*APIResponse, error) {
 	}
 
 	fmt.Printf("Response Body: %s\n", string(body))
+
+	// Handle Apple-specific 330 Moved Location redirect
+	if resp.StatusCode == 330 {
+		var redirect struct {
+			XAppleMmeHost string `json:"X-Apple-MMe-Host"`
+		}
+		if err := json.Unmarshal(body, &redirect); err != nil {
+			return nil, fmt.Errorf("unmarshaling redirect response: %w (body: %s)", err, string(body))
+		}
+
+		if redirect.XAppleMmeHost != "" {
+			fmt.Printf("Redirecting to host: %s\n", redirect.XAppleMmeHost)
+			// Extract token from original baseURL
+			parts := strings.Split(baseURL, "/")
+			if len(parts) < 4 {
+				return nil, fmt.Errorf("invalid baseURL format")
+			}
+			token := parts[3]
+			
+			// Build new baseURL with redirected host
+			newBaseURL := fmt.Sprintf("https://%s/%s/sharedstreams", redirect.XAppleMmeHost, token)
+			fmt.Printf("New baseURL: %s\n", newBaseURL)
+			
+			// Retry with new URL
+			return c.getAPIResponseWithRetry(newBaseURL, retryCount+1)
+		}
+		return nil, fmt.Errorf("redirect response missing X-Apple-MMe-Host")
+	}
 
 	var raw rawAPIResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -283,6 +330,14 @@ type urlResponse struct {
 }
 
 func (c *Client) getURLs(baseURL string, photoGUIDs []string) (map[string]string, error) {
+	return c.getURLsWithRetry(baseURL, photoGUIDs, 0)
+}
+
+func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCount int) (map[string]string, error) {
+	if retryCount > 2 {
+		return nil, fmt.Errorf("too many redirects")
+	}
+
 	url := fmt.Sprintf("%s/webasseturls", baseURL)
 
 	payload := map[string]interface{}{
@@ -325,6 +380,34 @@ func (c *Client) getURLs(baseURL string, photoGUIDs []string) (map[string]string
 
 	fmt.Printf("URL Response Body: %s\n", string(body))
 
+	// Handle Apple-specific 330 Moved Location redirect
+	if resp.StatusCode == 330 {
+		var redirect struct {
+			XAppleMmeHost string `json:"X-Apple-MMe-Host"`
+		}
+		if err := json.Unmarshal(body, &redirect); err != nil {
+			return nil, fmt.Errorf("unmarshaling redirect response: %w (body: %s)", err, string(body))
+		}
+
+		if redirect.XAppleMmeHost != "" {
+			fmt.Printf("Redirecting URLs to host: %s\n", redirect.XAppleMmeHost)
+			// Extract token from original baseURL
+			parts := strings.Split(baseURL, "/")
+			if len(parts) < 4 {
+				return nil, fmt.Errorf("invalid baseURL format")
+			}
+			token := parts[3]
+			
+			// Build new baseURL with redirected host
+			newBaseURL := fmt.Sprintf("https://%s/%s/sharedstreams", redirect.XAppleMmeHost, token)
+			fmt.Printf("New URLs baseURL: %s\n", newBaseURL)
+			
+			// Retry with new URL
+			return c.getURLsWithRetry(newBaseURL, photoGUIDs, retryCount+1)
+		}
+		return nil, fmt.Errorf("redirect response missing X-Apple-MMe-Host")
+	}
+
 	var response urlResponse
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("unmarshaling response: %w (body: %s)", err, string(body))
@@ -343,13 +426,18 @@ func (c *Client) getURLs(baseURL string, photoGUIDs []string) (map[string]string
 func enrichImagesWithURLs(apiResp *APIResponse, urls map[string]string) []Image {
 	images := make([]Image, 0, len(apiResp.Photos))
 	
+	fmt.Printf("Enriching %d photos with %d URLs\n", len(apiResp.PhotoGUIDs), len(urls))
 	for _, photoGUID := range apiResp.PhotoGUIDs {
 		if photo, ok := apiResp.Photos[photoGUID]; ok {
+			fmt.Printf("Processing photo %s with %d derivatives\n", photoGUID, len(photo.Derivatives))
 			for derivativeKey, derivative := range photo.Derivatives {
-				urlKey := fmt.Sprintf("%s-%s", photoGUID, derivativeKey)
-				if url, ok := urls[urlKey]; ok {
+				// Try to find URL by derivative checksum
+				if url, ok := urls[derivative.Checksum]; ok {
+					fmt.Printf("Found URL for %s (checksum %s): %s\n", photoGUID, derivative.Checksum, url)
 					derivative.URL = &url
 					photo.Derivatives[derivativeKey] = derivative
+				} else {
+					fmt.Printf("No URL found for %s (checksum %s)\n", photoGUID, derivative.Checksum)
 				}
 			}
 			images = append(images, photo)
