@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  icloud-api-go:
+    image: shogoki/icloud-api-go
+    build: . 
+    environment:
+      PORT: 80
+    ports:
+      - "8000:80"
+    networks:
+      default:
+      web:
+
+networks:
+    web:
+       external:
+           name: webproxy

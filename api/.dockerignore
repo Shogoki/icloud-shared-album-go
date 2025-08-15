@@ -1,0 +1,6 @@
+.git
+.vscode
+Makefile
+docker-compose.yml
+README.md
+*.md
