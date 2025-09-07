@@ -69,24 +69,42 @@ func getAlbumHandler(w http.ResponseWriter, r *http.Request) {
 	key := vars["key"]
 
 	if key == "" {
+		log.Printf("DEBUG: Missing album key in request")
 		sendError(w, http.StatusBadRequest, "Missing album key", "Album key is required")
 		return
 	}
 
+	log.Printf("DEBUG: Requesting album with key: %s", key)
+
 	// Create iCloud client and fetch images
 	client := icloudalbum.NewClient()
+	log.Printf("DEBUG: Created iCloud client, calling GetImages...")
+
 	response, err := client.GetImages(key)
 	if err != nil {
-		log.Printf("Error getting images for key %s: %v", key, err)
+		log.Printf("DEBUG: GetImages returned ERROR: %v", err)
 		sendError(w, http.StatusInternalServerError, "Failed to fetch album", err.Error())
 		return
 	}
 
+	log.Printf("DEBUG: GetImages completed successfully")
+	log.Printf("DEBUG: Response metadata - StreamName: %s, UserFirstName: %s, ItemsReturned: %d",
+		response.Metadata.StreamName, response.Metadata.UserFirstName, response.Metadata.ItemsReturned)
+
 	// Check if no photos were found
-	if response.Photos == nil || len(response.Photos) == 0 {
+	if response.Photos == nil {
+		log.Printf("DEBUG: Response.Photos is nil")
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+
+	if len(response.Photos) == 0 {
+		log.Printf("DEBUG: Response.Photos is empty (length 0)")
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	log.Printf("DEBUG: Found %d photos in response", len(response.Photos))
 
 	// Convert photos to ImageResponse format
 	imageResponses := make([]ImageResponse, 0, len(response.Photos))

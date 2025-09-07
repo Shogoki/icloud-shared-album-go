@@ -11,4 +11,4 @@ require (
 )
 
 // For local development, uncomment the line below and comment out the require version above
-// replace github.com/Shogoki/icloud-shared-album-go => ../
+replace github.com/Shogoki/icloud-shared-album-go => ../
