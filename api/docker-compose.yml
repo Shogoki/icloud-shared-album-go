@@ -1,8 +1,9 @@
-version: "3.8"
 services:
   icloud-api-go:
     image: shogoki/icloud-api-go
-    build: . 
+    build:
+      context: .. 
+      dockerfile: api/Dockerfile
     environment:
       PORT: 80
     ports:
