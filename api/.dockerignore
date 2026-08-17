@@ -1,6 +1,23 @@
+# The build only needs go.mod, go.sum and the .go sources.
 .git
+.gitignore
 .vscode
+.claude
+
+# Compiled binary — must never be baked into the image.
+icloud-api-go
+
+# Local environment files.
+.env
+.env.*
+!.env.example
+
+# Tooling and docs not needed by the build.
 Makefile
+Dockerfile
+.dockerignore
 docker-compose.yml
-README.md
 *.md
+
+# OS noise
+.DS_Store

@@ -1,0 +1,12 @@
+# Environment files — this repo is public; keep real values out of it.
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+/api/icloud-api-go
+/example/example
+
+# OS / editor
+.DS_Store
+.vscode/

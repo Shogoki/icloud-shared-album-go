@@ -1,0 +1,117 @@
+# Continuous deployment of the REST API to Dokploy.
+#
+# Builds and pushes the API image to GHCR, then asks Dokploy to redeploy the
+# application, which pulls the new image. Runs on every push to main and on
+# every v* tag, so main is always live and a release just adds version tags.
+#
+# NOTE — this repository is public. No domain, hostname or CORS origin may
+# appear in this file. Everything environment-specific lives in one of two
+# places, neither of them public:
+#
+#   * GitHub Actions secrets — the Dokploy endpoint and credentials below.
+#   * Dokploy's own environment for the application — the API's domain and
+#     CORS_ALLOWED_ORIGINS. These are needed only at runtime, never at build
+#     time, so they never reach a workflow log or the published image.
+#
+# GitHub side — three repository secrets (Settings → Secrets → Actions):
+#   DOKPLOY_URL      base URL of the Dokploy server
+#   DOKPLOY_API_KEY  Dokploy profile → API Keys → generate
+#   DOKPLOY_APP_ID   applicationId of the API application
+# The deploy step skips cleanly while any of them is unset, so the image build
+# keeps working before the secrets are set.
+#
+# The GHCR package inherits this repo's public visibility, so Dokploy pulls it
+# without registry credentials.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+# Serialize deploys: never let an older image overtake a newer one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Gate the push on green checks — this workflow deploys straight to
+      # production, so it cannot rely on CI passing in a separate workflow.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: api/go.mod
+      - run: go vet ./...
+        working-directory: api
+      - run: go test ./...
+        working-directory: api
+
+      - uses: docker/setup-buildx-action@v3 # container driver — needed for gha cache export
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-api
+          # `latest` is what Dokploy pulls and moves on every main push and
+          # tag; `sha-<commit>` and the semver tags stay immutable so a
+          # rollback can pin an exact build.
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          # api/ only — the Dockerfile no longer needs the parent module.
+          context: api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: [image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dokploy deployment
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          DOKPLOY_APP_ID: ${{ secrets.DOKPLOY_APP_ID }}
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOKPLOY_URL}" ] || [ -z "${DOKPLOY_API_KEY}" ] || [ -z "${DOKPLOY_APP_ID}" ]; then
+            echo "Dokploy secrets not configured — skipping deploy." >&2
+            exit 0
+          fi
+          # --fail-with-body so a 4xx both fails the job and shows Dokploy's
+          # error message instead of an empty exit code.
+          curl --fail-with-body -sS -X POST \
+            "${DOKPLOY_URL%/}/api/application.deploy" \
+            -H 'accept: application/json' \
+            -H 'Content-Type: application/json' \
+            -H "x-api-key: ${DOKPLOY_API_KEY}" \
+            -d "$(printf '{"applicationId":"%s","title":"%s","description":"%s"}' \
+                  "$DOKPLOY_APP_ID" \
+                  "ci: $VERSION" \
+                  "github.com/${GITHUB_REPOSITORY}@${GITHUB_SHA}")"
+          echo
+          echo "Deploy requested for $VERSION — follow it in the Dokploy deployments tab."

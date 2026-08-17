@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/rs/cors"
@@ -45,13 +46,15 @@ func main() {
 	// Add album endpoint
 	r.HandleFunc("/album/{key}", getAlbumHandler).Methods("GET")
 
-	// Setup CORS - matching the origins from the TypeScript version
+	// Liveness probe for the container healthcheck and the reverse proxy.
+	r.HandleFunc("/health", healthHandler).Methods("GET")
+
+	// Setup CORS. The deployment's real origins are supplied at runtime via
+	// CORS_ALLOWED_ORIGINS (comma-separated) so they stay out of this public
+	// repo and out of the published image. The default is local development
+	// only — a missing value fails closed rather than allowing everything.
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{
-			"http://localhost:1313",
-			"https://travel.igl-web.de", 
-			"https://traveldev.igl-web.de",
-		},
+		AllowedOrigins: allowedOrigins(),
 		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"*"},
 	})
@@ -61,6 +64,39 @@ func main() {
 
 	fmt.Printf("Listening on: localhost:%d\n", port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), handler))
+}
+
+// allowedOrigins reads the CORS allow-list from CORS_ALLOWED_ORIGINS, a
+// comma-separated list of origins. When unset it falls back to the local Hugo
+// dev server only, so an unconfigured deployment rejects browser callers
+// instead of accepting them.
+func allowedOrigins() []string {
+	raw := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if raw == "" {
+		return []string{"http://localhost:1313"}
+	}
+
+	origins := make([]string, 0, strings.Count(raw, ",")+1)
+	for _, origin := range strings.Split(raw, ",") {
+		if origin = strings.TrimSpace(origin); origin != "" {
+			origins = append(origins, origin)
+		}
+	}
+	if len(origins) == 0 {
+		return []string{"http://localhost:1313"}
+	}
+
+	log.Printf("CORS: allowing %d origin(s) from CORS_ALLOWED_ORIGINS", len(origins))
+	return origins
+}
+
+// healthHandler backs the container healthcheck. It must stay dependency-free:
+// the album endpoint talks to iCloud, and an outage there should not make the
+// container look unhealthy and get restarted.
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func getAlbumHandler(w http.ResponseWriter, r *http.Request) {

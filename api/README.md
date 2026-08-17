@@ -71,6 +71,16 @@ Fetches photos from an iCloud shared album.
 curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
 ```
 
+### GET /health
+
+Liveness probe used by the container healthcheck. Always returns `200` with
+`{"status":"ok"}` and never calls iCloud, so an upstream outage does not mark
+the container unhealthy.
+
+```bash
+curl "http://localhost:8000/health"
+```
+
 ## Configuration
 
 ### Environment Variables
@@ -78,13 +88,24 @@ curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8000` | Port number for the API server |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:1313` | Comma-separated list of browser origins allowed to call the API |
+
+See `.env.example` for a template.
 
 ### CORS Configuration
 
-The API is configured to allow requests from:
-- `http://localhost:1313`
-- `https://travel.igl-web.de` 
-- `https://traveldev.igl-web.de`
+Allowed origins come from `CORS_ALLOWED_ORIGINS` at runtime rather than being
+compiled in, because this repository — and the container image built from it —
+are public. The production origins live only in the Dokploy application's
+environment.
+
+```bash
+CORS_ALLOWED_ORIGINS=https://example.com,https://dev.example.com
+```
+
+When the variable is unset the API allows `http://localhost:1313` only. It
+fails closed: an unconfigured deployment rejects browser callers rather than
+accepting every origin.
 
 ## Response Format
 
@@ -123,7 +144,8 @@ api/
 ├── go.mod              # Go module dependencies
 ├── Makefile           # Build and development commands
 ├── Dockerfile         # Docker image configuration
-├── docker-compose.yml # Docker Compose configuration
+├── docker-compose.yml # Local development only (production runs on Dokploy)
+├── .env.example       # Template for local environment variables
 ├── .dockerignore      # Docker build exclusions
 └── README.md          # This file
 ```
@@ -136,28 +158,57 @@ api/
 
 ## Deployment
 
+Deployment is continuous: pushing to `main` builds the image, publishes it to
+GHCR and asks Dokploy to redeploy. See `.github/workflows/deploy.yml`.
+
+```
+push to main ──▶ go vet / go test ──▶ build image ──▶ ghcr.io ──▶ Dokploy pulls
+```
+
+Images are published as `ghcr.io/shogoki/icloud-shared-album-go-api`, tagged
+`latest` (what Dokploy pulls) plus immutable `sha-<commit>` and semver tags for
+rollbacks. Tagging a release `v*` runs the same pipeline and adds version tags.
+
+### Configuration split
+
+This repository is public, so nothing environment-specific is committed:
+
+| Value | Lives in |
+|---|---|
+| `DOKPLOY_URL`, `DOKPLOY_API_KEY`, `DOKPLOY_APP_ID` | GitHub Actions secrets |
+| API domain | Dokploy application domain |
+| `CORS_ALLOWED_ORIGINS`, `PORT` | Dokploy application environment |
+
+The domain and origins are needed only at runtime, never at build time, so they
+appear in neither the workflow logs nor the published image.
+
+Until the three secrets are set the deploy step skips with a message and the
+image build still runs.
+
 ### Docker Production
 
-The included Dockerfile uses multi-stage builds for optimal production images:
+The Dockerfile uses a multi-stage build; the build context is this directory.
 
-1. **Builder stage**: Downloads dependencies and compiles the Go binary
-2. **Runtime stage**: Minimal Alpine Linux image with just the binary and CA certificates
+1. **Builder stage**: Downloads dependencies and compiles a static Go binary
+2. **Runtime stage**: Minimal Alpine image with the binary, CA certificates and
+   a non-root user
 
 ```bash
-# Build and run production container
-docker build -t shogoki/icloud-api-go -f Dockerfile ..
-docker run -p 8000:80 -e PORT=80 shogoki/icloud-api-go
+docker build -t icloud-api-go:dev .
+docker run --rm -p 8000:80 -e PORT=80 icloud-api-go:dev
 ```
+
+The image declares a `HEALTHCHECK` against `/health`.
 
 ### Docker Compose
 
-For deployment with external networks (e.g., reverse proxy):
+`docker-compose.yml` is for local development only — production runs on Dokploy,
+which pulls the published image directly.
 
 ```bash
-docker-compose up -d
+cp .env.example .env
+docker-compose up --build
 ```
-
-This connects the API to the `webproxy` external network for integration with reverse proxy setups.
 
 ## Error Handling
 
