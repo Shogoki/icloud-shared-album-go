@@ -16,6 +16,22 @@ const chunkSize = 25
 // Client represents an iCloud album client
 type Client struct {
 	httpClient *http.Client
+
+	// Logf, when non-nil, receives a verbose trace of the exchange with
+	// iCloud: every request URL, every response body and every signed asset
+	// URL. It is nil by default — a library has no business writing to a
+	// caller's stdout, and the trace contains credentials-bearing URLs that
+	// do not belong in a production log. Set it to log.Printf (or similar)
+	// while debugging.
+	Logf func(format string, args ...any)
+}
+
+// logf forwards to Logf when the caller has opted into tracing, and is a no-op
+// otherwise.
+func (c *Client) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
 }
 
 // NewClient creates a new iCloud album client
@@ -32,20 +48,20 @@ func NewClient() *Client {
 // GetImages retrieves images from an iCloud shared album
 func (c *Client) GetImages(token string) (*Response, error) {
 	baseURL := getBaseURL(token)
-	fmt.Printf("Initial baseURL: %s\n", baseURL)
+	c.logf("Initial baseURL: %s\n", baseURL)
 	
 	// Handle potential redirects (added in 2024)
 	redirectedBaseURL, err := c.getRedirectedBaseURL(baseURL, token)
 	if err != nil {
 		return nil, fmt.Errorf("getting redirected base URL: %w", err)
 	}
-	fmt.Printf("Redirected baseURL: %s\n", redirectedBaseURL)
+	c.logf("Redirected baseURL: %s\n", redirectedBaseURL)
 
 	apiResponse, err := c.getAPIResponse(redirectedBaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("getting API response: %w", err)
 	}
-	fmt.Printf("Got API response with %d photos\n", len(apiResponse.PhotoGUIDs))
+	c.logf("Got API response with %d photos\n", len(apiResponse.PhotoGUIDs))
 
 	allURLs := make(map[string]string)
 	for i := 0; i < len(apiResponse.PhotoGUIDs); i += chunkSize {
@@ -55,22 +71,22 @@ func (c *Client) GetImages(token string) (*Response, error) {
 		}
 		chunk := apiResponse.PhotoGUIDs[i:end]
 
-		fmt.Printf("Getting URLs for chunk %d-%d of %d photos\n", i, end, len(apiResponse.PhotoGUIDs))
+		c.logf("Getting URLs for chunk %d-%d of %d photos\n", i, end, len(apiResponse.PhotoGUIDs))
 		urls, err := c.getURLs(redirectedBaseURL, chunk)
 		if err != nil {
 			return nil, fmt.Errorf("getting URLs for chunk: %w", err)
 		}
-		fmt.Printf("Got %d URLs for chunk\n", len(urls))
+		c.logf("Got %d URLs for chunk\n", len(urls))
 
 		for k, v := range urls {
 			allURLs[k] = v
-			fmt.Printf("URL for %s: %s\n", k, v)
+			c.logf("URL for %s: %s\n", k, v)
 		}
 	}
 
-	fmt.Printf("Total URLs collected: %d\n", len(allURLs))
-	enrichedPhotos := enrichImagesWithURLs(apiResponse, allURLs)
-	fmt.Printf("Enriched %d photos with URLs\n", len(enrichedPhotos))
+	c.logf("Total URLs collected: %d\n", len(allURLs))
+	enrichedPhotos := c.enrichImagesWithURLs(apiResponse, allURLs)
+	c.logf("Enriched %d photos with URLs\n", len(enrichedPhotos))
 
 	return &Response{
 		Metadata: apiResponse.Metadata,
@@ -193,7 +209,7 @@ func (c *Client) getAPIResponseWithRetry(baseURL string, retryCount int) (*APIRe
 	}
 
 	url := fmt.Sprintf("%s/webstream", baseURL)
-	fmt.Printf("Requesting URL: %s\n", url)
+	c.logf("Requesting URL: %s\n", url)
 
 	payload := map[string]interface{}{
 		"streamCtag": nil,
@@ -219,14 +235,14 @@ func (c *Client) getAPIResponseWithRetry(baseURL string, retryCount int) (*APIRe
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Response Status: %s\n", resp.Status)
+	c.logf("Response Status: %s\n", resp.Status)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
 
-	fmt.Printf("Response Body: %s\n", string(body))
+	c.logf("Response Body: %s\n", string(body))
 
 	// Handle Apple-specific 330 Moved Location redirect
 	if resp.StatusCode == 330 {
@@ -238,7 +254,7 @@ func (c *Client) getAPIResponseWithRetry(baseURL string, retryCount int) (*APIRe
 		}
 
 		if redirect.XAppleMmeHost != "" {
-			fmt.Printf("Redirecting to host: %s\n", redirect.XAppleMmeHost)
+			c.logf("Redirecting to host: %s\n", redirect.XAppleMmeHost)
 			// Extract token from original baseURL
 			parts := strings.Split(baseURL, "/")
 			if len(parts) < 4 {
@@ -248,7 +264,7 @@ func (c *Client) getAPIResponseWithRetry(baseURL string, retryCount int) (*APIRe
 			
 			// Build new baseURL with redirected host
 			newBaseURL := fmt.Sprintf("https://%s/%s/sharedstreams", redirect.XAppleMmeHost, token)
-			fmt.Printf("New baseURL: %s\n", newBaseURL)
+			c.logf("New baseURL: %s\n", newBaseURL)
 			
 			// Retry with new URL
 			return c.getAPIResponseWithRetry(newBaseURL, retryCount+1)
@@ -352,7 +368,7 @@ func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCoun
 	// Convert to string and back to match TypeScript behavior
 	payloadStr := string(payloadBytes)
 
-	fmt.Printf("URL Request Payload: %s\n", payloadStr)
+	c.logf("URL Request Payload: %s\n", payloadStr)
 
 	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(payloadStr))
 	if err != nil {
@@ -363,22 +379,22 @@ func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCoun
 		req.Header.Set(key, value)
 	}
 
-	fmt.Printf("Requesting URLs from: %s\n", url)
-	fmt.Printf("Requesting URLs for %d photos\n", len(photoGUIDs))
+	c.logf("Requesting URLs from: %s\n", url)
+	c.logf("Requesting URLs for %d photos\n", len(photoGUIDs))
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("URL Response Status: %s\n", resp.Status)
+	c.logf("URL Response Status: %s\n", resp.Status)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
 
-	fmt.Printf("URL Response Body: %s\n", string(body))
+	c.logf("URL Response Body: %s\n", string(body))
 
 	// Handle Apple-specific 330 Moved Location redirect
 	if resp.StatusCode == 330 {
@@ -390,7 +406,7 @@ func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCoun
 		}
 
 		if redirect.XAppleMmeHost != "" {
-			fmt.Printf("Redirecting URLs to host: %s\n", redirect.XAppleMmeHost)
+			c.logf("Redirecting URLs to host: %s\n", redirect.XAppleMmeHost)
 			// Extract token from original baseURL
 			parts := strings.Split(baseURL, "/")
 			if len(parts) < 4 {
@@ -400,7 +416,7 @@ func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCoun
 			
 			// Build new baseURL with redirected host
 			newBaseURL := fmt.Sprintf("https://%s/%s/sharedstreams", redirect.XAppleMmeHost, token)
-			fmt.Printf("New URLs baseURL: %s\n", newBaseURL)
+			c.logf("New URLs baseURL: %s\n", newBaseURL)
 			
 			// Retry with new URL
 			return c.getURLsWithRetry(newBaseURL, photoGUIDs, retryCount+1)
@@ -417,27 +433,27 @@ func (c *Client) getURLsWithRetry(baseURL string, photoGUIDs []string, retryCoun
 	for itemID, item := range response.Items {
 		url := fmt.Sprintf("https://%s%s", item.URLLocation, item.URLPath)
 		urls[itemID] = url
-		fmt.Printf("Generated URL for %s: %s\n", itemID, url)
+		c.logf("Generated URL for %s: %s\n", itemID, url)
 	}
 
 	return urls, nil
 }
 
-func enrichImagesWithURLs(apiResp *APIResponse, urls map[string]string) []Image {
+func (c *Client) enrichImagesWithURLs(apiResp *APIResponse, urls map[string]string) []Image {
 	images := make([]Image, 0, len(apiResp.Photos))
 	
-	fmt.Printf("Enriching %d photos with %d URLs\n", len(apiResp.PhotoGUIDs), len(urls))
+	c.logf("Enriching %d photos with %d URLs\n", len(apiResp.PhotoGUIDs), len(urls))
 	for _, photoGUID := range apiResp.PhotoGUIDs {
 		if photo, ok := apiResp.Photos[photoGUID]; ok {
-			fmt.Printf("Processing photo %s with %d derivatives\n", photoGUID, len(photo.Derivatives))
+			c.logf("Processing photo %s with %d derivatives\n", photoGUID, len(photo.Derivatives))
 			for derivativeKey, derivative := range photo.Derivatives {
 				// Try to find URL by derivative checksum
 				if url, ok := urls[derivative.Checksum]; ok {
-					fmt.Printf("Found URL for %s (checksum %s): %s\n", photoGUID, derivative.Checksum, url)
+					c.logf("Found URL for %s (checksum %s): %s\n", photoGUID, derivative.Checksum, url)
 					derivative.URL = &url
 					photo.Derivatives[derivativeKey] = derivative
 				} else {
-					fmt.Printf("No URL found for %s (checksum %s)\n", photoGUID, derivative.Checksum)
+					c.logf("No URL found for %s (checksum %s)\n", photoGUID, derivative.Checksum)
 				}
 			}
 			images = append(images, photo)
