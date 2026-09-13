@@ -204,3 +204,97 @@ func TestImageProxyUpstreamFailure(t *testing.T) {
 		t.Error("the signed upstream URL leaked into the error response")
 	}
 }
+
+// A CDN will not cache a response that varies on anything but Accept-Encoding,
+// and the image bytes are the one thing here worth caching. Wrapping the whole
+// router in the CORS middleware stamped Vary: Origin on every image and made
+// them all uncacheable — cf-cache-status: DYNAMIC on every view, with the full
+// image re-fetched from iCloud each time.
+//
+// Images are loaded as <img src>, which is not subject to CORS, so the
+// middleware has no business on this route.
+func TestImageProxySendsNoVaryHeader(t *testing.T) {
+	stub := newUpstreamStub(t, "JPEGBYTES")
+	// The real wiring from main(), not a bare router: the point of this test
+	// is which routes the CORS middleware wraps.
+	router := realRoutes(t, stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/img/ALBUM/GUID-1/full", nil)
+	req.Header.Set("Origin", "https://travel.example.com")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary = %q; any Vary makes the image uncacheable at the edge", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Access-Control-Allow-Origin = %q; images need no CORS", got)
+	}
+}
+
+// The .jpg suffix exists so a CDN that decides cacheability from the file
+// extension will cache these at all. Both spellings must resolve identically.
+func TestImageProxyAcceptsJpgSuffix(t *testing.T) {
+	for _, path := range []string{
+		"/img/ALBUM/GUID-1/full.jpg",
+		"/img/ALBUM/GUID-1/full",
+		"/img/ALBUM/GUID-1/thumb.jpg",
+	} {
+		t.Run(path, func(t *testing.T) {
+			stub := newUpstreamStub(t, "JPEGBYTES")
+			router := proxyServer(t, stub)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if rec.Body.String() != "JPEGBYTES" {
+				t.Errorf("body = %q", rec.Body.String())
+			}
+		})
+	}
+}
+
+// The suffix must not smuggle an unknown size past validation.
+func TestImageProxyRejectsUnknownSizeWithSuffix(t *testing.T) {
+	stub := newUpstreamStub(t, "JPEGBYTES")
+	router := proxyServer(t, stub)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/img/ALBUM/GUID-1/original.jpg", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
+
+// realRoutes builds the handler exactly as main() does, against a stub album.
+func realRoutes(t *testing.T, stub *upstreamStub) http.Handler {
+	t.Helper()
+	p := photo("GUID-1", time.Unix(100, 0), map[string]icloudalbum.Derivative{
+		"342":  {Checksum: "thumb-sum", FileSize: 1_000, Width: 342, Height: 257, URL: ptr(stub.server.URL + "/thumb.jpg")},
+		"2048": {Checksum: "full-sum", FileSize: 900_000, Width: 2048, Height: 1536, URL: ptr(stub.server.URL + "/full.jpg")},
+	})
+	srv := &server{
+		albums: newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+			return &icloudalbum.Response{Photos: []icloudalbum.Image{p}}, nil
+		}),
+		upstream: stub.server.Client(),
+	}
+	return srv.routes(originAllowed([]string{"https://travel.example.com"}))
+}
+
+// The album endpoint is the one a browser fetches with fetch(), so it must
+// still answer CORS — the fix above must not have turned it off everywhere.
+func TestAlbumEndpointStillSendsCORS(t *testing.T) {
+	stub := newUpstreamStub(t, "JPEGBYTES")
+	router := realRoutes(t, stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/album/TOKEN", nil)
+	req.Header.Set("Origin", "https://travel.example.com")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://travel.example.com" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want the requesting origin", got)
+	}
+}
