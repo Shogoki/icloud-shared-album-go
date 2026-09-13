@@ -4,12 +4,12 @@ A REST API server built in Go that provides easy access to iCloud Shared Albums.
 
 ## Features
 
-- ✅ **REST API** endpoint for fetching album photos
-- ✅ **CORS enabled** for web application integration  
-- ✅ **Simplified response format** with caption, URLs, and asset type
-- ✅ **Automatic sorting** by date created
+- ✅ **Album endpoint** returning a shared album's photos as JSON
+- ✅ **Image proxy** with stable, non-expiring URLs a static site can embed
+- ✅ **Album caching** so a page of images costs one iCloud lookup, not one per image
+- ✅ **CORS** for web application integration, loopback always allowed for local development
+- ✅ **Chronological ordering** by date created
 - ✅ **Docker support** with multi-stage builds
-- ✅ **Production ready** with proper error handling
 
 ## Quick Start
 
@@ -52,13 +52,25 @@ Fetches photos from an iCloud shared album.
 ```json
 [
   {
+    "photoGuid": "CF778672-3802-48BD-BE8C-9314656F065C",
     "caption": "Photo caption",
     "fullImageUrl": "https://cvws.icloud-content.com/.../full-image.JPG",
-    "thumbnailUrl": "https://cvws.icloud-content.com/.../thumbnail.JPG", 
-    "assetType": "image"
+    "thumbnailUrl": "https://cvws.icloud-content.com/.../thumbnail.JPG",
+    "assetType": "image",
+    "width": 2049,
+    "height": 1536,
+    "thumbWidth": 342,
+    "thumbHeight": 257
   }
 ]
 ```
+
+> **`fullImageUrl` and `thumbnailUrl` expire.** They are signed by iCloud and
+> stop working roughly three hours after the response is produced, so they
+> cannot be baked into a static page. Use `photoGuid` with the image proxy
+> below for anything that outlives that window.
+
+Responses carry `Cache-Control: public, max-age=900`.
 
 **Status Codes:**
 - `200 OK`: Photos found and returned
@@ -69,6 +81,39 @@ Fetches photos from an iCloud shared album.
 **Example:**
 ```bash
 curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
+```
+
+### GET /img/:album/:photoGuid/:size
+
+Streams one image. `size` is `thumb` (iCloud's ~342px preview) or `full` (the
+original).
+
+Unlike the signed URLs above, **this URL never expires** — which is what makes
+it usable from static markup generated ahead of time:
+
+```html
+<img src="https://api.example.com/img/B2R5.../CF778672-.../thumb"
+     width="342" height="257" loading="lazy" alt="…">
+```
+
+The proxy resolves the current signed URL server-side and streams the bytes
+back. It can only ever fetch URLs iCloud itself returned for the requested
+album, so it is not a general-purpose fetcher.
+
+Responses carry `Cache-Control: public, max-age=2592000` and an `ETag` taken
+from the derivative checksum, so a matching `If-None-Match` is answered with a
+`304` without touching iCloud. `Range` is forwarded upstream so seeking within
+a video works.
+
+**Status Codes:**
+- `200 OK` / `206 Partial Content`: image streamed
+- `304 Not Modified`: the client's `ETag` still matches
+- `400 Bad Request`: `size` is neither `thumb` nor `full`
+- `404 Not Found`: no such photo in that album, or it has no usable derivative
+- `502 Bad Gateway`: the album or the image could not be fetched from iCloud
+
+```bash
+curl "http://localhost:8000/img/B19Gtec4X8nCmDH/<photoGuid>/thumb" -o photo.jpg
 ```
 
 ### GET /health
@@ -88,7 +133,8 @@ curl "http://localhost:8000/health"
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8000` | Port number for the API server |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:1313` | Comma-separated list of browser origins allowed to call the API |
+| `CORS_ALLOWED_ORIGINS` | *(none)* | Comma-separated list of browser origins allowed to call the API. Loopback origins are always allowed on top of these. |
+| `ALBUM_CACHE_TTL_SECONDS` | `3600` | How long a resolved album is reused. Capped at 2h, because the signed URLs it holds expire after about 3h. |
 
 See `.env.example` for a template.
 
@@ -103,20 +149,35 @@ environment.
 CORS_ALLOWED_ORIGINS=https://example.com,https://dev.example.com
 ```
 
-When the variable is unset the API allows `http://localhost:1313` only. It
-fails closed: an unconfigured deployment rejects browser callers rather than
-accepting every origin.
+Loopback origins (`http://localhost:*`, `http://127.0.0.1:*`, `http://[::1]:*`)
+are **always** allowed, on top of whatever is configured. Without that, setting
+`CORS_ALLOWED_ORIGINS` to the production site silently breaks every local
+`hugo server`, and the only symptom is a `Failed to fetch` in the browser
+console. Nothing here is protected by the origin check — the albums are public
+and the API is read-only — so it governs only which sites may spend this
+server's bandwidth.
+
+Any non-loopback origin that is not configured is rejected.
 
 ## Response Format
 
 The API returns a simplified format compared to the full iCloud API response:
 
+- **`photoGuid`**: Stable identifier; addresses the image proxy
 - **`caption`**: Photo caption/description
-- **`fullImageUrl`**: URL to the full-size image  
-- **`thumbnailUrl`**: URL to the thumbnail image
+- **`fullImageUrl`**: Signed URL to the full-size image — **expires after ~3h**
+- **`thumbnailUrl`**: Signed URL to the thumbnail — **expires after ~3h**
 - **`assetType`**: Either "image" or "video"
+- **`width`** / **`height`**: Full-size dimensions
+- **`thumbWidth`** / **`thumbHeight`**: Thumbnail dimensions
 
-Photos are automatically sorted by date created (ascending).
+Photos are sorted by date created, ascending, with a `photoGuid` tiebreak so
+photos sharing a timestamp keep a stable order between calls — a generator that
+commits this order to markup would otherwise see spurious diffs.
+
+iCloud ships two derivatives per photo (a ~342px preview and the original), but
+that is not guaranteed, so the thumbnail and full image are chosen as the
+smallest and largest by file size.
 
 ## Development
 
@@ -140,7 +201,10 @@ make docker-run    # Run Docker container
 
 ```
 api/
-├── main.go              # Main API server code
+├── main.go              # Wiring: config, router, CORS, health
+├── album.go             # /album/{key} and the photo → JSON mapping
+├── image.go             # /img/{album}/{guid}/{size} proxy
+├── cache.go             # Album cache shared by both endpoints
 ├── go.mod              # Go module dependencies
 ├── Makefile           # Build and development commands
 ├── Dockerfile         # Docker image configuration
@@ -223,25 +287,33 @@ The API provides proper HTTP status codes and JSON error responses:
 
 ## Security
 
-- **CORS**: Configured for specific allowed origins
+- **CORS**: Configured for specific allowed origins, plus loopback
 - **No sensitive data exposure**: Only returns processed photo URLs and metadata
 - **Minimal attack surface**: Stateless API with no data persistence
+- **Proxy is not an open fetcher**: `/img` can only reach URLs iCloud returned
+  for the requested album; it never takes a URL from the caller
+- **Signed URLs stay out of errors and logs**: upstream failures report a
+  generic message rather than echoing the URL
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Port already in use**: Change the `PORT` environment variable
-2. **CORS errors**: Add your domain to the allowed origins list in `main.go`
+2. **CORS errors**: Add your domain to `CORS_ALLOWED_ORIGINS` in the deployment's environment. Local development needs no configuration — loopback is always allowed.
 3. **Album not found**: Verify the album token is correct and the album is accessible
 
 ### Logging
 
-The API provides detailed console logging for:
-- Request processing
-- Album fetching progress  
-- URL enrichment status
-- Error conditions
+The API logs startup, CORS configuration and errors. The library's verbose
+protocol trace is **off**: it prints every signed asset URL, and those do not
+belong in a production log. Turn it on while debugging by setting `Logf` on the
+client in `main.go`:
+
+```go
+client := icloudalbum.NewClient()
+client.Logf = log.Printf
+```
 
 ## License
 
