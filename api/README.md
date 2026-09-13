@@ -86,7 +86,12 @@ curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
 ### GET /img/:album/:photoGuid/:size
 
 Streams one image. `size` is `thumb` (iCloud's ~342px preview) or `full` (the
-original).
+original), optionally suffixed `.jpg`.
+
+**Use the `.jpg` form.** A CDN's default cache level typically decides what is
+cacheable from the file extension in the path; without one these look like
+dynamic responses and are never cached. The suffix is cosmetic — the bytes are
+whatever iCloud stored.
 
 Unlike the signed URLs above, **this URL never expires** — which is what makes
 it usable from static markup generated ahead of time:
@@ -105,6 +110,12 @@ from the derivative checksum, so a matching `If-None-Match` is answered with a
 `304` without touching iCloud. `Range` is forwarded upstream so seeking within
 a video works.
 
+This route is deliberately **not** wrapped in the CORS middleware. Images are
+loaded as `<img src>`, which is not subject to CORS, and the middleware stamps
+`Vary: Origin` on whatever it wraps — which stops a CDN caching the response at
+all, since caches refuse to store anything that varies on a header other than
+`Accept-Encoding`. Keep it off this route.
+
 **Status Codes:**
 - `200 OK` / `206 Partial Content`: image streamed
 - `304 Not Modified`: the client's `ETag` still matches
@@ -113,7 +124,14 @@ a video works.
 - `502 Bad Gateway`: the album or the image could not be fetched from iCloud
 
 ```bash
-curl "http://localhost:8000/img/B19Gtec4X8nCmDH/<photoGuid>/thumb" -o photo.jpg
+curl "http://localhost:8000/img/B19Gtec4X8nCmDH/<photoGuid>/thumb.jpg" -o photo.jpg
+```
+
+Verify caching is actually working after a deploy — `DYNAMIC` here means every
+view is re-fetched from iCloud:
+
+```bash
+curl -sI "https://your-api/img/<album>/<photoGuid>/full.jpg" | grep -i 'cf-cache-status\|vary'
 ```
 
 ### GET /health
@@ -287,7 +305,8 @@ The API provides proper HTTP status codes and JSON error responses:
 
 ## Security
 
-- **CORS**: Configured for specific allowed origins, plus loopback
+- **CORS**: Configured for specific allowed origins, plus loopback — applied to
+  `/album` only, since `/img` is not subject to CORS
 - **No sensitive data exposure**: Only returns processed photo URLs and metadata
 - **Minimal attack surface**: Stateless API with no data persistence
 - **Proxy is not an open fetcher**: `/img` can only reach URLs iCloud returned

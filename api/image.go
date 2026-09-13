@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 
 	icloudalbum "github.com/Shogoki/icloud-shared-album-go"
 	"github.com/gorilla/mux"
@@ -32,9 +33,17 @@ const (
 	sizeFull  = "full"
 )
 
+// A CDN's default cache level typically decides what is cacheable from the
+// file extension in the path, so callers address these as ".../full.jpg" and
+// the suffix is stripped here. It is cosmetic — the bytes are whatever iCloud
+// stored — but without it the response looks dynamic and is never cached.
+// Extensionless paths keep working.
+const jpegSuffix = ".jpg"
+
 func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	album, guid, size := vars["album"], vars["guid"], vars["size"]
+	size = strings.TrimSuffix(size, jpegSuffix)
 
 	if size != sizeThumb && size != sizeFull {
 		sendError(w, http.StatusBadRequest, "Unknown size",

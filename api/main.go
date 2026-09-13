@@ -39,23 +39,39 @@ func main() {
 		upstream: &http.Client{Timeout: 60 * time.Second},
 	}
 
+	addr := ":" + strconv.Itoa(port)
+	log.Printf("listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, srv.routes(originAllowed(configuredOrigins()))))
+}
+
+// routes builds the request handler. It is separate from main so tests can
+// exercise the real wiring — in particular which routes the CORS middleware
+// does and does not wrap, which is load-bearing rather than cosmetic.
+func (s *server) routes(allowOrigin func(string) bool) http.Handler {
 	r := mux.NewRouter()
-	r.HandleFunc("/album/{key}", srv.getAlbumHandler).Methods(http.MethodGet)
+
+	// CORS goes on /album only. It is read with fetch(), so a browser needs
+	// the header; /img is loaded as <img src>, which is not subject to CORS at
+	// all. That distinction matters for more than tidiness: the CORS
+	// middleware stamps "Vary: Origin" on whatever it wraps, and a CDN will
+	// not cache a response that varies on anything but Accept-Encoding. With
+	// the middleware around the whole router, every proxied image came back
+	// cf-cache-status: DYNAMIC and was re-fetched from iCloud on every view.
+	albumCORS := cors.New(cors.Options{
+		AllowOriginFunc: allowOrigin,
+		AllowedMethods:  []string{http.MethodGet, http.MethodHead, http.MethodOptions},
+		AllowedHeaders:  []string{"*"},
+	})
+	r.Handle("/album/{key}", albumCORS.Handler(http.HandlerFunc(s.getAlbumHandler))).
+		Methods(http.MethodGet, http.MethodOptions)
+
 	// HEAD is served too so a cache can revalidate an image without a body.
-	r.HandleFunc("/img/{album}/{guid}/{size}", srv.getImageHandler).
+	r.HandleFunc("/img/{album}/{guid}/{size}", s.getImageHandler).
 		Methods(http.MethodGet, http.MethodHead)
 	// Liveness probe for the container healthcheck and the reverse proxy.
 	r.HandleFunc("/health", healthHandler).Methods(http.MethodGet)
 
-	handler := cors.New(cors.Options{
-		AllowOriginFunc: originAllowed(configuredOrigins()),
-		AllowedMethods:  []string{http.MethodGet, http.MethodHead, http.MethodOptions},
-		AllowedHeaders:  []string{"*"},
-	}).Handler(r)
-
-	addr := ":" + strconv.Itoa(port)
-	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+	return r
 }
 
 // albumTTL reads ALBUM_CACHE_TTL_SECONDS, which must stay below the roughly
