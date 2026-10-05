@@ -45,9 +45,9 @@ func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 	album, guid, size := vars["album"], vars["guid"], vars["size"]
 	size = strings.TrimSuffix(size, jpegSuffix)
 
-	if size != sizeThumb && size != sizeFull {
+	if size != sizeThumb && size != sizeMedium && size != sizeFull {
 		sendError(w, http.StatusBadRequest, "Unknown size",
-			"Size must be "+sizeThumb+" or "+sizeFull)
+			"Size must be "+sizeThumb+", "+sizeMedium+" or "+sizeFull)
 		return
 	}
 
@@ -69,6 +69,10 @@ func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 	thumb, full, ok := pickDerivatives(photo)
 	if !ok {
 		sendError(w, http.StatusNotFound, "No derivative", "The photo has no usable derivative")
+		return
+	}
+	if size == sizeMedium {
+		s.serveMedium(w, r, album, guid, thumb, full)
 		return
 	}
 	derivative := full
