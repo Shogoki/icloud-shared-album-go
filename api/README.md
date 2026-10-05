@@ -60,7 +60,9 @@ Fetches photos from an iCloud shared album.
     "width": 2049,
     "height": 1536,
     "thumbWidth": 342,
-    "thumbHeight": 257
+    "thumbHeight": 257,
+    "mediumWidth": 1024,
+    "mediumHeight": 768
   }
 ]
 ```
@@ -85,8 +87,22 @@ curl "http://localhost:8000/album/B19Gtec4X8nCmDH"
 
 ### GET /img/:album/:photoGuid/:size
 
-Streams one image. `size` is `thumb` (iCloud's ~342px preview) or `full` (the
-original), optionally suffixed `.jpg`.
+Streams one image, optionally suffixed `.jpg`. `size` is one of:
+
+| size | what | typical |
+|---|---|---|
+| `thumb` | iCloud's preview, as stored | 342px, 30–110 KB |
+| `medium` | the original scaled so its longer edge is at most 1024px, JPEG q80 | 60–260 KB |
+| `full` | the original, as stored | 2048px, 0.3–1.3 MB |
+
+`medium` exists because neither stored derivative fits a card or a gallery
+tile on a retina screen: the preview is blurry there, and the original is
+several times more bytes than the screen can show. It is resized on request
+(never enlarged — an original already within 1024px is streamed as-is), at
+most four at a time, and cached like the other sizes. If the original cannot
+be decoded as an image — a video, say — the preview is served instead, so an
+`<img>` asking for `medium` always gets a picture. `Range` is not supported
+for `medium`.
 
 **Use the `.jpg` form.** A CDN's default cache level typically decides what is
 cacheable from the file extension in the path; without one these look like
@@ -119,7 +135,7 @@ all, since caches refuse to store anything that varies on a header other than
 **Status Codes:**
 - `200 OK` / `206 Partial Content`: image streamed
 - `304 Not Modified`: the client's `ETag` still matches
-- `400 Bad Request`: `size` is neither `thumb` nor `full`
+- `400 Bad Request`: `size` is not `thumb`, `medium` or `full`
 - `404 Not Found`: no such photo in that album, or it has no usable derivative
 - `502 Bad Gateway`: the album or the image could not be fetched from iCloud
 
@@ -188,6 +204,7 @@ The API returns a simplified format compared to the full iCloud API response:
 - **`assetType`**: Either "image" or "video"
 - **`width`** / **`height`**: Full-size dimensions
 - **`thumbWidth`** / **`thumbHeight`**: Thumbnail dimensions
+- **`mediumWidth`** / **`mediumHeight`**: Dimensions of the proxy's `medium` size
 
 Photos are sorted by date created, ascending, with a `photoGuid` tiebreak so
 photos sharing a timestamp keep a stable order between calls — a generator that
@@ -222,6 +239,7 @@ api/
 ├── main.go              # Wiring: config, router, CORS, health
 ├── album.go             # /album/{key} and the photo → JSON mapping
 ├── image.go             # /img/{album}/{guid}/{size} proxy
+├── medium.go            # the resized "medium" size
 ├── cache.go             # Album cache shared by both endpoints
 ├── go.mod              # Go module dependencies
 ├── Makefile           # Build and development commands
