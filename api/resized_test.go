@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,7 +63,7 @@ func mediumServer(t *testing.T, fullW, fullH int, fullBody string) (*mux.Router,
 	return r, stub
 }
 
-func TestMediumSize(t *testing.T) {
+func TestScaledSize(t *testing.T) {
 	for _, tc := range []struct{ w, h, wantW, wantH int }{
 		{2048, 1536, 1024, 768}, // landscape
 		{1536, 2048, 768, 1024}, // portrait
@@ -70,9 +74,9 @@ func TestMediumSize(t *testing.T) {
 		{0, 0, 0, 0},            // unknown dimensions pass through
 		{5000, 10, 1024, 2},     // extreme panorama keeps a visible height
 	} {
-		gotW, gotH := mediumSize(tc.w, tc.h)
+		gotW, gotH := scaledSize(tc.w, tc.h, 1024)
 		if gotW != tc.wantW || gotH != tc.wantH {
-			t.Errorf("mediumSize(%d, %d) = %d×%d, want %d×%d", tc.w, tc.h, gotW, gotH, tc.wantW, tc.wantH)
+			t.Errorf("scaledSize(%d, %d, 1024) = %d×%d, want %d×%d", tc.w, tc.h, gotW, gotH, tc.wantW, tc.wantH)
 		}
 	}
 }
@@ -258,5 +262,87 @@ func TestAlbumReportsMediumDimensions(t *testing.T) {
 	}
 	if out[1].MediumWidth != 640 || out[1].MediumHeight != 480 {
 		t.Errorf("small medium = %d×%d, want the original 640×480", out[1].MediumWidth, out[1].MediumHeight)
+	}
+	if out[0].SmallWidth != 640 || out[0].SmallHeight != 480 {
+		t.Errorf("landscape small = %d×%d, want 640×480", out[0].SmallWidth, out[0].SmallHeight)
+	}
+	if out[1].SmallWidth != 640 || out[1].SmallHeight != 480 {
+		t.Errorf("640×480 original small = %d×%d, want it unchanged", out[1].SmallWidth, out[1].SmallHeight)
+	}
+}
+
+// small is the same machinery at 640px; it gets its own ETag so the two sizes
+// can never be served for each other from a cache.
+func TestSmallResizesTheOriginal(t *testing.T) {
+	router, _ := mediumServer(t, 2048, 1536, string(testJPEG(t, 2048, 1536)))
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/img/ALBUM/GUID-1/small.jpg", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	img, _, err := image.Decode(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("response is not an image: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != 640 || b.Dy() != 480 {
+		t.Errorf("decoded size = %d×%d, want 640×480", b.Dx(), b.Dy())
+	}
+	if got := rec.Header().Get("ETag"); got != `"full-sum-m640q80"` {
+		t.Errorf("ETag = %q, want the small-size validator", got)
+	}
+}
+
+// Every upstream URL is a signed iCloud URL. Go's client errors print the URL
+// they failed on, so they must be stripped before they reach the log.
+func TestWithoutURLStripsTheSignedURL(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://cvws.icloud-content.com/x.JPG?sig=secret", Err: errors.New("context canceled")}
+	got := withoutURL(err).Error()
+	if strings.Contains(got, "sig=secret") || strings.Contains(got, "icloud-content") {
+		t.Errorf("withoutURL kept the URL: %q", got)
+	}
+	if !strings.Contains(got, "context canceled") {
+		t.Errorf("withoutURL dropped the cause: %q", got)
+	}
+}
+
+// End to end: an upstream that cannot be reached must not put its signed URL
+// into the server log, on either the streaming or the resizing path.
+func TestUpstreamErrorsDoNotLogSignedURLs(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close() // connection refused from here on
+
+	p := photo("GUID-1", time.Unix(100, 0), map[string]icloudalbum.Derivative{
+		"342":  {Checksum: "t", FileSize: 1_000, Width: 342, Height: 257, URL: ptr(deadURL + "/thumb.jpg?sig=secret")},
+		"full": {Checksum: "f", FileSize: 900_000, Width: 2048, Height: 1536, URL: ptr(deadURL + "/full.jpg?sig=secret")},
+	})
+	srv := &server{
+		albums: newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+			return &icloudalbum.Response{Photos: []icloudalbum.Image{p}}, nil
+		}),
+		upstream: &http.Client{Timeout: 2 * time.Second},
+	}
+	r := mux.NewRouter()
+	r.HandleFunc("/img/{album}/{guid}/{size}", srv.getImageHandler).Methods(http.MethodGet)
+
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	for _, size := range []string{"full", "thumb", "small", "medium"} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/img/ALBUM/GUID-1/"+size+".jpg", nil))
+		if rec.Code != http.StatusBadGateway {
+			t.Errorf("%s: status = %d, want 502", size, rec.Code)
+		}
+	}
+	if logs.Len() == 0 {
+		t.Fatal("expected the failures to be logged")
+	}
+	if strings.Contains(logs.String(), "sig=secret") {
+		t.Errorf("signed URL leaked into the log:\n%s", logs.String())
 	}
 }
