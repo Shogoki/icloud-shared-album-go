@@ -15,7 +15,9 @@ import (
 // PhotoGUID, the dimensions and AssetType exist so a static site generator can
 // build markup ahead of time: the GUID addresses the image proxy, whose URLs do
 // not expire, and the dimensions let a page reserve the right box before the
-// image arrives. FullImageURL and ThumbnailURL remain the signed iCloud URLs
+// image arrives. Small*/Medium* are the dimensions the proxy's resized
+// "small" and "medium" sizes come out at, so a page can size them without
+// fetching them. FullImageURL and ThumbnailURL remain the signed iCloud URLs
 // and stop working roughly three hours after this response is produced.
 type ImageResponse struct {
 	PhotoGUID    string `json:"photoGuid"`
@@ -27,6 +29,10 @@ type ImageResponse struct {
 	Height       int    `json:"height"`
 	ThumbWidth   int    `json:"thumbWidth"`
 	ThumbHeight  int    `json:"thumbHeight"`
+	SmallWidth   int    `json:"smallWidth"`
+	SmallHeight  int    `json:"smallHeight"`
+	MediumWidth  int    `json:"mediumWidth"`
+	MediumHeight int    `json:"mediumHeight"`
 }
 
 // ErrorResponse represents error response structure
@@ -100,6 +106,8 @@ func toImageResponses(photos []icloudalbum.Image) []ImageResponse {
 			assetType = "video"
 		}
 
+		smallWidth, smallHeight := scaledSize(full.Width, full.Height, resizedSizes[sizeSmall])
+		mediumWidth, mediumHeight := scaledSize(full.Width, full.Height, resizedSizes[sizeMedium])
 		out = append(out, ImageResponse{
 			PhotoGUID:    photo.PhotoGUID,
 			Caption:      photo.Caption,
@@ -110,6 +118,10 @@ func toImageResponses(photos []icloudalbum.Image) []ImageResponse {
 			Height:       full.Height,
 			ThumbWidth:   thumb.Width,
 			ThumbHeight:  thumb.Height,
+			SmallWidth:   smallWidth,
+			SmallHeight:  smallHeight,
+			MediumWidth:  mediumWidth,
+			MediumHeight: mediumHeight,
 		})
 	}
 
