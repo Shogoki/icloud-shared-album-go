@@ -45,9 +45,10 @@ func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 	album, guid, size := vars["album"], vars["guid"], vars["size"]
 	size = strings.TrimSuffix(size, jpegSuffix)
 
-	if size != sizeThumb && size != sizeFull {
+	maxEdge, resized := resizedSizes[size]
+	if size != sizeThumb && size != sizeFull && !resized {
 		sendError(w, http.StatusBadRequest, "Unknown size",
-			"Size must be "+sizeThumb+" or "+sizeFull)
+			"Size must be "+sizeThumb+", "+sizeSmall+", "+sizeMedium+" or "+sizeFull)
 		return
 	}
 
@@ -69,6 +70,10 @@ func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 	thumb, full, ok := pickDerivatives(photo)
 	if !ok {
 		sendError(w, http.StatusNotFound, "No derivative", "The photo has no usable derivative")
+		return
+	}
+	if resized {
+		s.serveResized(w, r, album, guid, maxEdge, thumb, full)
 		return
 	}
 	derivative := full
@@ -108,7 +113,7 @@ func (s *server) streamImage(w http.ResponseWriter, r *http.Request, url, album,
 
 	resp, err := s.upstream.Do(req)
 	if err != nil {
-		log.Printf("image %s/%s: fetching asset: %v", album, guid, err)
+		log.Printf("image %s/%s: fetching asset: %v", album, guid, withoutURL(err))
 		sendError(w, http.StatusBadGateway, "Upstream fetch failed", "The image could not be fetched")
 		return
 	}

@@ -8,6 +8,7 @@ require (
 	github.com/Shogoki/icloud-shared-album-go v0.2.0
 	github.com/gorilla/mux v1.8.1
 	github.com/rs/cors v1.10.1
+	golang.org/x/image v0.30.0
 )
 
 // For local development, uncomment the line below and comment out the require version above
