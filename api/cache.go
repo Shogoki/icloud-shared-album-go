@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -39,6 +40,7 @@ type albumEntry struct {
 	ready   chan struct{}
 	resp    *icloudalbum.Response
 	err     error
+	fetched time.Time // when the fetch behind resp and err started
 	expires time.Time
 }
 
@@ -63,12 +65,31 @@ func newAlbumCache(ttl time.Duration, fetch albumFetcher) *albumCache {
 // Concurrent calls for the same token share one fetch; calls for different
 // tokens do not block each other.
 func (c *albumCache) get(token string) (*icloudalbum.Response, error) {
+	return c.load(token, time.Time{})
+}
+
+// refresh is get for a caller with reason to doubt the cached album: one
+// resolved more than maxAge ago is fetched again instead of reused.
+//
+// The image proxy asks for this before answering 404 for a photo the cached
+// album lacks, since the album may predate the photo or come from a lookup
+// iCloud only half answered. maxAge bounds what that costs: requests for a GUID
+// that really does not exist trigger at most one lookup per album per maxAge.
+func (c *albumCache) refresh(token string, maxAge time.Duration) (*icloudalbum.Response, error) {
+	return c.load(token, c.now().Add(-maxAge))
+}
+
+// load returns the cached album for token if it is unexpired and was fetched
+// no earlier than notBefore, and fetches it otherwise.
+func (c *albumCache) load(token string, notBefore time.Time) (*icloudalbum.Response, error) {
 	c.mu.Lock()
 
 	if entry, ok := c.entries[token]; ok {
 		// An entry whose fetch is still running has a zero expiry and must be
-		// waited on rather than treated as stale.
-		if entry.expires.IsZero() || entry.expires.After(c.now()) {
+		// waited on rather than treated as stale. It is also as fresh as any
+		// caller can ask for, having started after whatever was cached before.
+		inFlight := entry.expires.IsZero()
+		if inFlight || (entry.expires.After(c.now()) && !entry.fetched.Before(notBefore)) {
 			c.mu.Unlock()
 			<-entry.ready
 			return entry.resp, entry.err
@@ -79,7 +100,7 @@ func (c *albumCache) get(token string) (*icloudalbum.Response, error) {
 		c.sweepLocked()
 	}
 
-	entry := &albumEntry{ready: make(chan struct{})}
+	entry := &albumEntry{ready: make(chan struct{}), fetched: c.now()}
 	c.entries[token] = entry
 	c.mu.Unlock()
 
@@ -96,6 +117,37 @@ func (c *albumCache) get(token string) (*icloudalbum.Response, error) {
 
 	close(entry.ready)
 	return resp, err
+}
+
+// errEmptyAlbum stands in for an album that resolved to no photos at all. That
+// is far more often a lookup iCloud failed to answer properly than a shared
+// album someone emptied, and caching it as a success would turn every photo of
+// the album into a 404 for the full TTL.
+var errEmptyAlbum = errors.New("iCloud returned no photos for the album")
+
+// completeAlbums wraps fetch so that only an album with photos counts as a
+// success. A failed or empty lookup is tried once more — a reset connection or
+// a 5xx from iCloud is usually momentary — and if it is still unusable it is an
+// error: the cache keeps it for albumErrorTTL only, and the endpoints answer
+// 5xx rather than reporting the photos as nonexistent.
+func completeAlbums(fetch albumFetcher) albumFetcher {
+	once := func(token string) (*icloudalbum.Response, error) {
+		resp, err := fetch(token)
+		if err != nil {
+			return nil, err
+		}
+		if resp == nil || len(resp.Photos) == 0 {
+			return nil, errEmptyAlbum
+		}
+		return resp, nil
+	}
+	return func(token string) (*icloudalbum.Response, error) {
+		resp, err := once(token)
+		if err != nil {
+			resp, err = once(token)
+		}
+		return resp, err
+	}
 }
 
 // sweepLocked drops entries that have expired. The caller holds c.mu. Entries

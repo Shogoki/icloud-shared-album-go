@@ -35,7 +35,7 @@ func main() {
 	// The library's protocol trace is opt-in and stays off here: it prints
 	// every signed asset URL, which does not belong in a production log.
 	srv := &server{
-		albums:   newAlbumCache(albumTTL(), client.GetImages),
+		albums:   newAlbumCache(albumTTL(), completeAlbums(client.GetImages)),
 		upstream: &http.Client{Timeout: 60 * time.Second},
 	}
 

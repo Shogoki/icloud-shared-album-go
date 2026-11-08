@@ -74,7 +74,7 @@ func resizedETag(full icloudalbum.Derivative, maxEdge int) string {
 // derivatives have already been resolved.
 func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, guid string, maxEdge int, thumb, full icloudalbum.Derivative) {
 	if full.URL == nil {
-		sendError(w, http.StatusNotFound, "No URL", "The derivative has no resolved URL")
+		sendNoURL(w)
 		return
 	}
 
@@ -108,7 +108,7 @@ func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, gui
 		// is always an image, so a page asking for one still gets a picture.
 		log.Printf("image %s/%s: resize failed, serving the preview instead: %v", album, guid, err)
 		if thumb.URL == nil {
-			sendError(w, http.StatusNotFound, "No URL", "The derivative has no resolved URL")
+			sendNoURL(w)
 			return
 		}
 		w.Header().Set("ETag", `"`+thumb.Checksum+`"`)
@@ -130,19 +130,11 @@ func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, gui
 // fetchAll downloads a whole upstream asset into memory, up to
 // resizeMaxSourceBytes.
 func (s *server) fetchAll(r *http.Request, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+	resp, err := s.getUpstream(r, url, "")
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.upstream.Do(req)
-	if err != nil {
-		return nil, withoutURL(err)
-	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		// Deliberately not the URL: it is signed, and this ends up in logs.
-		return nil, fmt.Errorf("upstream returned %s", resp.Status)
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, resizeMaxSourceBytes+1))
 	if err != nil {
 		return nil, err
