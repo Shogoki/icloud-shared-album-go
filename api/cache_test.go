@@ -152,3 +152,81 @@ func TestAlbumCacheSweepsExpiredEntries(t *testing.T) {
 			before, len(c.entries))
 	}
 }
+
+// refresh exists so the image proxy can double-check a cached album before
+// calling a photo nonexistent. It must re-fetch an album older than maxAge,
+// but reuse a younger one, or a stream of requests for a bogus GUID would each
+// cost an iCloud lookup.
+func TestAlbumCacheRefreshRefetchesOnlyOlderEntries(t *testing.T) {
+	var calls atomic.Int32
+	c := newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+		calls.Add(1)
+		return &icloudalbum.Response{}, nil
+	})
+	now := time.Now()
+	c.now = func() time.Time { return now }
+
+	c.get("TOKEN")
+	now = now.Add(30 * time.Second)
+	c.refresh("TOKEN", time.Minute)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetched %d times, want an album younger than maxAge reused", got)
+	}
+
+	now = now.Add(time.Minute)
+	c.refresh("TOKEN", time.Minute)
+	c.refresh("TOKEN", time.Minute)
+	if got := calls.Load(); got != 2 {
+		t.Errorf("fetched %d times, want exactly one re-fetch of the older album", got)
+	}
+	// What refresh fetched is an ordinary entry: get reuses it.
+	c.get("TOKEN")
+	if got := calls.Load(); got != 2 {
+		t.Errorf("fetched %d times, want get to reuse the refreshed album", got)
+	}
+}
+
+func TestCompleteAlbums(t *testing.T) {
+	full := &icloudalbum.Response{Photos: []icloudalbum.Image{{PhotoGUID: "a"}}}
+	blip := errors.New("connection reset by peer")
+
+	for _, tc := range []struct {
+		name      string
+		results   []*icloudalbum.Response // nil entries fail with blip
+		wantErr   error
+		wantCalls int32
+	}{
+		{"success is passed through", []*icloudalbum.Response{full}, nil, 1},
+		{"a failure is retried once", []*icloudalbum.Response{nil, full}, nil, 2},
+		{"two failures are an error", []*icloudalbum.Response{nil, nil}, blip, 2},
+		// An empty listing is a failed lookup, not a valid album: cached as
+		// one, it would 404 every photo of the album for the full TTL.
+		{"an empty album is retried", []*icloudalbum.Response{{}, full}, nil, 2},
+		{"an empty album twice is an error", []*icloudalbum.Response{{}, {}}, errEmptyAlbum, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			fetch := completeAlbums(func(string) (*icloudalbum.Response, error) {
+				r := tc.results[calls.Add(1)-1]
+				if r == nil {
+					return nil, blip
+				}
+				return r, nil
+			})
+
+			resp, err := fetch("TOKEN")
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v", err, tc.wantErr)
+			}
+			if err == nil && resp != full {
+				t.Errorf("resp = %+v, want the album with photos", resp)
+			}
+			if err != nil && resp != nil {
+				t.Errorf("resp = %+v alongside an error", resp)
+			}
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Errorf("fetched %d times, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}

@@ -74,13 +74,15 @@ Fetches photos from an iCloud shared album.
 > cannot be baked into a static page. Use `photoGuid` with the image proxy
 > below for anything that outlives that window.
 
-Responses carry `Cache-Control: public, max-age=900`.
+Responses carry `Cache-Control: public, max-age=900`; errors carry
+`Cache-Control: no-store` (see [Error Handling](#error-handling)).
 
 **Status Codes:**
 - `200 OK`: Photos found and returned
-- `404 Not Found`: No photos found in the album
 - `400 Bad Request`: Missing or invalid album key
-- `500 Internal Server Error`: Server error during processing
+- `500 Internal Server Error`: The album could not be resolved — including when
+  iCloud returns no photos at all, which is far more often a failed lookup than
+  an emptied album
 
 **Example:**
 ```bash
@@ -131,6 +133,21 @@ from the derivative checksum, so a matching `If-None-Match` is answered with a
 `304` without touching iCloud. `Range` is forwarded upstream so seeking within
 a video works.
 
+Because a success is cached for a month, the proxy is careful about what it
+lets look like one, and about what it calls permanent:
+
+- **A `2xx` is always a whole image.** An upstream answer that is not
+  `image/*` or `video/*` is a `502`. If iCloud drops the connection mid-image,
+  the response is cut off rather than ended cleanly, so no cache can store the
+  truncated bytes as complete.
+- **`404` means a fresh listing lacks the photo.** A photo missing from the
+  cached album — or missing its signed URL — sends the proxy back to iCloud for
+  a new listing first, at most once a minute per album. If that lookup fails,
+  the answer is a `502`: nobody knows whether the photo exists.
+- **Momentary failures are retried once**: an album lookup that fails or comes
+  back empty, and an asset fetch that fails outright or gets a `5xx`.
+- **Errors are never cached** (`Cache-Control: no-store`).
+
 This route is deliberately **not** wrapped in the CORS middleware. Images are
 loaded as `<img src>`, which is not subject to CORS, and the middleware stamps
 `Vary: Origin` on whatever it wraps — which stops a CDN caching the response at
@@ -141,8 +158,10 @@ all, since caches refuse to store anything that varies on a header other than
 - `200 OK` / `206 Partial Content`: image streamed
 - `304 Not Modified`: the client's `ETag` still matches
 - `400 Bad Request`: `size` is not `thumb`, `small`, `medium` or `full`
-- `404 Not Found`: no such photo in that album, or it has no usable derivative
-- `502 Bad Gateway`: the album or the image could not be fetched from iCloud
+- `404 Not Found`: a fresh listing of the album has no such photo, or the photo
+  has no derivative at all
+- `502 Bad Gateway`: the album or the image could not be fetched from iCloud,
+  iCloud returned no URL for it, or what it returned was not an image
 
 ```bash
 curl "http://localhost:8000/img/B19Gtec4X8nCmDH/<photoGuid>/thumb.jpg" -o photo.jpg
@@ -324,6 +343,19 @@ The API provides proper HTTP status codes and JSON error responses:
   "error": "Failed to fetch album",
   "message": "Detailed error description"
 }
+```
+
+Every error response carries `Cache-Control: no-store` and no `ETag`. An error
+describes one moment — iCloud was slow, an album came back half resolved — and
+a cache that keeps it turns a blip into a broken image for hours. Leaving the
+header off is not enough: a CDN fills in its own default, and Cloudflare's is
+`max-age=14400`.
+
+Check after a deploy:
+
+```bash
+curl -sI "https://your-api/img/<album>/00000000-0000-0000-0000-000000000000/medium.jpg" | grep -i 'HTTP/\|cache-control'
+# HTTP/2 404 … cache-control: no-store
 ```
 
 ## Security

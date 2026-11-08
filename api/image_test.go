@@ -25,6 +25,7 @@ func newUpstreamStub(t *testing.T, body string) *upstreamStub {
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		stub.requests = append(stub.requests, r.Clone(r.Context()))
 		if rng := r.Header.Get("Range"); rng != "" {
+			w.Header().Set("Content-Type", "image/jpeg")
 			w.Header().Set("Content-Range", "bytes 0-3/"+"100")
 			w.WriteHeader(http.StatusPartialContent)
 			w.Write([]byte(stub.body[:4]))
