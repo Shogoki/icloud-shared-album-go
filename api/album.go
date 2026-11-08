@@ -149,11 +149,6 @@ func (s *server) getAlbumHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(response.Photos) == 0 {
-		sendError(w, http.StatusNotFound, "Album is empty", "No photos were returned for this album")
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	// The signed URLs in this payload outlive the response by about three
 	// hours, so a short shared cache is safe and spares iCloud the repeat.
@@ -163,7 +158,20 @@ func (s *server) getAlbumHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// errorCacheControl keeps every error response out of every cache. An error
+// describes one moment — iCloud was slow, an album came back half resolved —
+// and a cache that keeps it turns a blip into a broken image for hours. Leaving
+// the header off is not enough: a CDN fills in its own default, and Cloudflare's
+// is max-age=14400, which is how a 404 for a photo that exists stayed on a
+// reader's phone.
+const errorCacheControl = "no-store"
+
 func sendError(w http.ResponseWriter, statusCode int, error string, message string) {
+	// The image proxy sets its long-lived cache headers and ETag before it
+	// knows whether the fetch will succeed; none of that may go out on an
+	// error sent in the image's place.
+	w.Header().Del("ETag")
+	w.Header().Set("Cache-Control", errorCacheControl)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(ErrorResponse{Error: error, Message: message})
