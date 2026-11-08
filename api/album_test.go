@@ -161,12 +161,12 @@ func TestToImageResponsesSkipsPhotosWithoutDerivatives(t *testing.T) {
 func newTestServer(t *testing.T, photos []icloudalbum.Image, err error) (*server, *mux.Router) {
 	t.Helper()
 	srv := &server{
-		albums: newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+		albums: newAlbumCache(time.Hour, completeAlbums(func(string) (*icloudalbum.Response, error) {
 			if err != nil {
 				return nil, err
 			}
 			return &icloudalbum.Response{Photos: photos}, nil
-		}),
+		})),
 		upstream: http.DefaultClient,
 	}
 	r := mux.NewRouter()
@@ -200,11 +200,17 @@ func TestGetAlbumHandler(t *testing.T) {
 	}
 }
 
+// An album that resolves to nothing is far more likely a lookup iCloud failed
+// to answer than an emptied album, so it is a server error, not a 404 — and,
+// like every error, must not be cached.
 func TestGetAlbumHandlerEmpty(t *testing.T) {
 	_, router := newTestServer(t, nil, nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/album/TOKEN", nil))
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec.Code)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != errorCacheControl {
+		t.Errorf("Cache-Control = %q, want %q", got, errorCacheControl)
 	}
 }
