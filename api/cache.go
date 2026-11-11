@@ -2,6 +2,8 @@ package main
 
 import (
 	"errors"
+	"net/url"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,11 +16,18 @@ import (
 // once, so the resolved album is cached and concurrent callers share a single
 // in-flight fetch.
 //
-// The asset URLs inside a resolved album are signed and expire three hours
-// after they are issued, which is the hard ceiling on the TTL. An hour leaves
-// every URL handed to a browser at least two hours of life.
+// The asset URLs inside a resolved album are signed, and each one states when
+// it stops working in its "e" parameter (Unix seconds). That has been observed
+// at twenty minutes after issue — not the three hours once assumed here, which
+// left the cache serving dead URLs for most of every hour. An album is
+// therefore cached until its earliest URL is urlExpiryMargin from expiring,
+// and the TTL is only a ceiling for albums whose URLs state no expiry.
 const (
-	defaultAlbumTTL = time.Hour
+	defaultAlbumTTL = 15 * time.Minute
+
+	// The least life any URL handed out still has: enough for a browser that
+	// just received the album to load what it lists.
+	urlExpiryMargin = 5 * time.Minute
 
 	// A failed lookup is cached briefly so an iCloud outage does not turn
 	// into a retry storm against iCloud, while still recovering quickly.
@@ -111,12 +120,55 @@ func (c *albumCache) load(token string, notBefore time.Time) (*icloudalbum.Respo
 	if err != nil {
 		entry.expires = c.now().Add(albumErrorTTL)
 	} else {
-		entry.expires = c.now().Add(c.ttl)
+		entry.expires = c.expiryFor(resp)
 	}
 	c.mu.Unlock()
 
 	close(entry.ready)
 	return resp, err
+}
+
+// expiryFor is when a freshly resolved album stops being reused: after the
+// TTL, or once its earliest URL is within urlExpiryMargin of expiring,
+// whichever is sooner. It is never sooner than albumErrorTTL, so an album
+// whose URLs arrive nearly expired is re-fetched promptly but not on every
+// request.
+func (c *albumCache) expiryFor(resp *icloudalbum.Response) time.Time {
+	now := c.now()
+	expires := now.Add(c.ttl)
+	if urlsExpire, ok := urlExpiry(resp.Photos); ok {
+		if usable := urlsExpire.Add(-urlExpiryMargin); usable.Before(expires) {
+			expires = usable
+		}
+	}
+	if floor := now.Add(albumErrorTTL); expires.Before(floor) {
+		expires = floor
+	}
+	return expires
+}
+
+// urlExpiry returns when the first signed URL among photos expires, read from
+// the URLs' "e" parameter. ok is false if no URL states an expiry.
+func urlExpiry(photos []icloudalbum.Image) (earliest time.Time, ok bool) {
+	for _, photo := range photos {
+		for _, d := range photo.Derivatives {
+			if d.URL == nil {
+				continue
+			}
+			u, err := url.Parse(*d.URL)
+			if err != nil {
+				continue
+			}
+			e, err := strconv.ParseInt(u.Query().Get("e"), 10, 64)
+			if err != nil || e <= 0 {
+				continue
+			}
+			if t := time.Unix(e, 0); !ok || t.Before(earliest) {
+				earliest, ok = t, true
+			}
+		}
+	}
+	return earliest, ok
 }
 
 // errEmptyAlbum stands in for an album that resolved to no photos at all. That

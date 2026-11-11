@@ -74,9 +74,10 @@ func (s *server) routes(allowOrigin func(string) bool) http.Handler {
 	return r
 }
 
-// albumTTL reads ALBUM_CACHE_TTL_SECONDS, which must stay below the roughly
-// three-hour life of iCloud's signed URLs so the album endpoint never hands
-// out a URL that is about to stop working.
+// albumTTL reads ALBUM_CACHE_TTL_SECONDS, the longest a resolved album is
+// reused. It is a ceiling only: an album is re-fetched sooner when its signed
+// URLs are about to expire (see albumCache.expiryFor), so no value here can
+// make the album endpoint hand out a dead URL.
 func albumTTL() time.Duration {
 	raw := os.Getenv("ALBUM_CACHE_TTL_SECONDS")
 	if raw == "" {
@@ -87,12 +88,7 @@ func albumTTL() time.Duration {
 		log.Printf("ignoring invalid ALBUM_CACHE_TTL_SECONDS %q", raw)
 		return defaultAlbumTTL
 	}
-	ttl := time.Duration(n) * time.Second
-	if ttl > 2*time.Hour {
-		log.Printf("ALBUM_CACHE_TTL_SECONDS %d is too close to the signed-URL expiry; using %s", n, defaultAlbumTTL)
-		return defaultAlbumTTL
-	}
-	return ttl
+	return time.Duration(n) * time.Second
 }
 
 // configuredOrigins reads the deployment's browser origins from

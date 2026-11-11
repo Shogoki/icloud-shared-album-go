@@ -70,12 +70,14 @@ Fetches photos from an iCloud shared album.
 ```
 
 > **`fullImageUrl` and `thumbnailUrl` expire.** They are signed by iCloud and
-> stop working roughly three hours after the response is produced, so they
-> cannot be baked into a static page. Use `photoGuid` with the image proxy
-> below for anything that outlives that window.
+> stop working twenty minutes after iCloud issues them — so within minutes of
+> the response — and cannot be baked into a static page. Use `photoGuid` with
+> the image proxy below for anything that outlives that window.
 
-Responses carry `Cache-Control: public, max-age=900`; errors carry
-`Cache-Control: no-store` (see [Error Handling](#error-handling)).
+Responses carry `Cache-Control: public, max-age=900`, shortened so that no
+cached copy outlives its URLs: whenever it is used, every URL in it still has at
+least five minutes left. Errors carry `Cache-Control: no-store` (see
+[Error Handling](#error-handling)).
 
 **Status Codes:**
 - `200 OK`: Photos found and returned
@@ -192,7 +194,7 @@ curl "http://localhost:8000/health"
 |----------|---------|-------------|
 | `PORT` | `8000` | Port number for the API server |
 | `CORS_ALLOWED_ORIGINS` | *(none)* | Comma-separated list of browser origins allowed to call the API. Loopback origins are always allowed on top of these. |
-| `ALBUM_CACHE_TTL_SECONDS` | `3600` | How long a resolved album is reused. Capped at 2h, because the signed URLs it holds expire after about 3h. |
+| `ALBUM_CACHE_TTL_SECONDS` | `900` | The longest a resolved album is reused. An album is re-fetched sooner, five minutes before its first signed URL expires, whatever this says. |
 
 See `.env.example` for a template.
 
@@ -223,8 +225,8 @@ The API returns a simplified format compared to the full iCloud API response:
 
 - **`photoGuid`**: Stable identifier; addresses the image proxy
 - **`caption`**: Photo caption/description
-- **`fullImageUrl`**: Signed URL to the full-size image — **expires after ~3h**
-- **`thumbnailUrl`**: Signed URL to the thumbnail — **expires after ~3h**
+- **`fullImageUrl`**: Signed URL to the full-size image — **expires within minutes**
+- **`thumbnailUrl`**: Signed URL to the thumbnail — **expires within minutes**
 - **`assetType`**: Either "image" or "video"
 - **`width`** / **`height`**: Full-size dimensions
 - **`thumbWidth`** / **`thumbHeight`**: Thumbnail dimensions

@@ -13,7 +13,7 @@ import (
 )
 
 // The image proxy exists because iCloud's asset URLs are signed and expire
-// about three hours after they are issued. That makes them impossible to put
+// twenty minutes after they are issued. That makes them impossible to put
 // into a static page at build time, which is what forced the gallery to fetch
 // the album from the browser on every page load.
 //
@@ -42,6 +42,13 @@ const albumRecheckAfter = time.Minute
 
 // upstreamAttempts is how often an asset fetch is tried before giving up.
 const upstreamAttempts = 2
+
+// asset is one derivative the proxy is about to fetch: the signed URL it has
+// for it, and what identifies it if that URL turns out to be dead.
+type asset struct {
+	album, guid string
+	derivative  icloudalbum.Derivative
+}
 
 // A CDN's default cache level typically decides what is cacheable from the
 // file extension in the path, so callers address these as ".../full.jpg" and
@@ -119,13 +126,14 @@ func (s *server) getImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.streamImage(w, r, *derivative.URL, album, guid)
+	s.streamImage(w, r, asset{album, guid, derivative})
 }
 
 // streamImage copies the upstream asset to the client, forwarding Range so
 // that seeking within a video keeps working.
-func (s *server) streamImage(w http.ResponseWriter, r *http.Request, url, album, guid string) {
-	resp, err := s.getUpstream(r, url, r.Header.Get("Range"))
+func (s *server) streamImage(w http.ResponseWriter, r *http.Request, a asset) {
+	album, guid := a.album, a.guid
+	resp, err := s.getUpstream(r, a, r.Header.Get("Range"))
 	if err != nil {
 		log.Printf("image %s/%s: fetching asset: %v", album, guid, err)
 		sendError(w, http.StatusBadGateway, "Upstream fetch failed", "The image could not be fetched")
@@ -170,8 +178,12 @@ func (s *server) streamImage(w http.ResponseWriter, r *http.Request, url, album,
 // getUpstream fetches an iCloud asset, sending rng as its Range header if set.
 // Anything but a 200 or 206 is an error. A fetch that fails outright or that
 // iCloud answers with a 5xx is tried again: both are usually momentary, and
-// the alternative is a broken image. A 4xx is not, as it will not change.
-func (s *server) getUpstream(r *http.Request, url, rng string) (*http.Response, error) {
+// the alternative is a broken image. Most 4xx are not, as they will not
+// change — except that a 401 or 403 is what iCloud answers for an expired
+// signature, so those are tried once more with a freshly signed URL.
+func (s *server) getUpstream(r *http.Request, a asset, rng string) (*http.Response, error) {
+	url := *a.derivative.URL
+	resigned := false
 	var err error
 	for attempt := 0; attempt < upstreamAttempts; attempt++ {
 		var resp *http.Response
@@ -188,11 +200,55 @@ func (s *server) getUpstream(r *http.Request, url, rng string) (*http.Response, 
 		resp.Body.Close()
 		// Deliberately not the URL: it is signed, and this ends up in logs.
 		err = fmt.Errorf("upstream returned %s", resp.Status)
+		if isSignatureRejection(resp.StatusCode) && !resigned {
+			resigned = true
+			fresh, ok := s.resign(a)
+			if !ok {
+				return nil, err
+			}
+			log.Printf("image %s/%s: signed URL rejected (%s), retrying with a fresh one", a.album, a.guid, resp.Status)
+			url = fresh
+			attempt-- // a fresh URL is a fresh start, not a retry of the dead one
+			continue
+		}
 		if resp.StatusCode < http.StatusInternalServerError {
 			return nil, err
 		}
 	}
 	return nil, err
+}
+
+func isSignatureRejection(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
+}
+
+// resign looks a's derivative up in a fresh listing of its album and returns
+// the URL iCloud signed for it there. ok is false if there is no new URL to
+// try: the lookup failed, the derivative is gone, or the listing was already
+// fresh and holds the same URL.
+//
+// The listing comes from refresh with albumRecheckAfter, so however many
+// images of an album hit dead URLs at once, they share one iCloud lookup per
+// albumRecheckAfter.
+func (s *server) resign(a asset) (string, bool) {
+	if a.derivative.Checksum == "" {
+		return "", false // nothing to recognise the derivative by
+	}
+	response, err := s.albums.refresh(a.album, albumRecheckAfter)
+	if err != nil {
+		log.Printf("image %s/%s: re-resolving album for a fresh URL: %v", a.album, a.guid, err)
+		return "", false
+	}
+	photo, found := findPhoto(response.Photos, a.guid)
+	if !found {
+		return "", false
+	}
+	for _, d := range photo.Derivatives {
+		if d.Checksum == a.derivative.Checksum && d.URL != nil && *d.URL != *a.derivative.URL {
+			return *d.URL, true
+		}
+	}
+	return "", false
 }
 
 func (s *server) getUpstreamOnce(r *http.Request, url, rng string) (*http.Response, error) {

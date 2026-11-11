@@ -88,14 +88,14 @@ func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, gui
 
 	// Already small enough: the original is this size.
 	if sw, sh := scaledSize(full.Width, full.Height, maxEdge); sw == full.Width && sh == full.Height && full.Width > 0 {
-		s.streamImage(w, r, *full.URL, album, guid)
+		s.streamImage(w, r, asset{album, guid, full})
 		return
 	}
 
 	resizeSlots <- struct{}{}
 	defer func() { <-resizeSlots }()
 
-	body, err := s.fetchAll(r, *full.URL)
+	body, err := s.fetchAll(r, asset{album, guid, full})
 	if err != nil {
 		log.Printf("image %s/%s: fetching original to resize: %v", album, guid, err)
 		sendError(w, http.StatusBadGateway, "Upstream fetch failed", "The image could not be fetched")
@@ -112,7 +112,7 @@ func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, gui
 			return
 		}
 		w.Header().Set("ETag", `"`+thumb.Checksum+`"`)
-		s.streamImage(w, r, *thumb.URL, album, guid)
+		s.streamImage(w, r, asset{album, guid, thumb})
 		return
 	}
 
@@ -129,8 +129,8 @@ func (s *server) serveResized(w http.ResponseWriter, r *http.Request, album, gui
 
 // fetchAll downloads a whole upstream asset into memory, up to
 // resizeMaxSourceBytes.
-func (s *server) fetchAll(r *http.Request, url string) ([]byte, error) {
-	resp, err := s.getUpstream(r, url, "")
+func (s *server) fetchAll(r *http.Request, a asset) ([]byte, error) {
+	resp, err := s.getUpstream(r, a, "")
 	if err != nil {
 		return nil, err
 	}
