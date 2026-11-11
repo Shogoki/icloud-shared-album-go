@@ -2,9 +2,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -227,7 +230,10 @@ func TestImageProxyRetriesUpstreamServerErrors(t *testing.T) {
 		wantTries int32
 	}{
 		{"5xx is retried", http.StatusServiceUnavailable, http.StatusOK, 2},
+		// The album was resolved moments ago, so a fresh listing would hold
+		// the same URL: there is nothing new to try.
 		{"4xx is not", http.StatusForbidden, http.StatusBadGateway, 1},
+		{"401 on a fresh album is not", http.StatusUnauthorized, http.StatusBadGateway, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var tries atomic.Int32
@@ -286,5 +292,94 @@ func TestImageProxyAbortsATruncatedStream(t *testing.T) {
 	if err == nil {
 		t.Errorf("read a complete %d response with body %q; a truncated image must not end cleanly",
 			resp.StatusCode, body)
+	}
+}
+
+// An expired signature is the one 4xx that a retry can fix: iCloud answers 401
+// for it, and a fresh listing of the album carries a newly signed URL for the
+// same derivative. Every size must pick that up rather than serve a 502.
+func TestImageProxyResignsRejectedURLs(t *testing.T) {
+	jpeg := testJPEG(t, 2048, 1536)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/expired/") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(jpeg)
+	}))
+	defer upstream.Close()
+
+	for _, size := range []string{"thumb", "small", "medium", "full"} {
+		t.Run(size, func(t *testing.T) {
+			var calls atomic.Int32
+			srv, router := imageServer(t, func(string) (*icloudalbum.Response, error) {
+				base := upstream.URL + "/fresh"
+				if calls.Add(1) == 1 {
+					base = upstream.URL + "/expired"
+				}
+				return &icloudalbum.Response{Photos: []icloudalbum.Image{stubPhoto("GUID-1", base)}}, nil
+			}, upstream.Client())
+			now := time.Now()
+			srv.albums.now = func() time.Time { return now }
+
+			srv.albums.get("ALBUM") // cache the listing with the dead URLs
+			now = now.Add(albumRecheckAfter + time.Second)
+
+			rec := get(router, "/img/ALBUM/GUID-1/"+size+".jpg")
+			if rec.Code != http.StatusOK {
+				t.Errorf("status = %d, want 200", rec.Code)
+			}
+			if got := calls.Load(); got != 2 {
+				t.Errorf("album fetched %d times, want one re-fetch for the fresh URL", got)
+			}
+		})
+	}
+}
+
+// A gallery page asks for every image of an album at once. When they all hit
+// dead URLs, they must share one fresh listing, not each start their own.
+func TestImageProxyResignSharesOneLookup(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/expired/") {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write([]byte("JPEGBYTES"))
+	}))
+	defer upstream.Close()
+
+	var calls atomic.Int32
+	srv, router := imageServer(t, func(string) (*icloudalbum.Response, error) {
+		base := upstream.URL + "/fresh"
+		if calls.Add(1) == 1 {
+			base = upstream.URL + "/expired"
+		}
+		var photos []icloudalbum.Image
+		for i := 0; i < 10; i++ {
+			photos = append(photos, stubPhoto(fmt.Sprintf("GUID-%d", i), base))
+		}
+		return &icloudalbum.Response{Photos: photos}, nil
+	}, upstream.Client())
+	now := time.Now()
+	srv.albums.now = func() time.Time { return now }
+
+	srv.albums.get("ALBUM")
+	now = now.Add(albumRecheckAfter + time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if rec := get(router, fmt.Sprintf("/img/ALBUM/GUID-%d/full.jpg", i)); rec.Code != http.StatusOK {
+				t.Errorf("GUID-%d: status = %d, want 200", i, rec.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := calls.Load(); got != 2 {
+		t.Errorf("album fetched %d times, want one shared re-fetch", got)
 	}
 }
