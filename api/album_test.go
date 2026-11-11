@@ -214,3 +214,29 @@ func TestGetAlbumHandlerEmpty(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want %q", got, errorCacheControl)
 	}
 }
+
+// A cached copy of the album response is used for as long as its max-age, so
+// the max-age must end before the URLs in it get within the margin of expiry.
+func TestAlbumCacheControl(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for _, tc := range []struct {
+		name    string
+		expires time.Duration // from now; 0 means the URLs state none
+		want    string
+	}{
+		{"no stated expiry", 0, "public, max-age=900"},
+		{"URLs outlive the max-age", 30 * time.Minute, "public, max-age=900"},
+		{"URLs expire sooner", 12 * time.Minute, "public, max-age=420"},
+		{"URLs within the margin", 2 * time.Minute, "public, max-age=0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			photos := []icloudalbum.Image{photo("a", time.Unix(100, 0), twoDerivatives("a"))}
+			if tc.expires != 0 {
+				photos = signedAlbum(now.Add(tc.expires), now.Add(time.Hour)).Photos
+			}
+			if got := albumCacheControl(photos, now); got != tc.want {
+				t.Errorf("albumCacheControl = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
