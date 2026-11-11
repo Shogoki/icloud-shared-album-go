@@ -75,9 +75,9 @@ func TestAlbumTTL(t *testing.T) {
 		{"garbage falls back", "not-a-number", defaultAlbumTTL},
 		{"zero falls back", "0", defaultAlbumTTL},
 		{"negative falls back", "-60", defaultAlbumTTL},
-		// The signed URLs this cache hands out live about three hours, so a
-		// TTL near that would serve URLs that expire in the reader's browser.
-		{"too close to the signed-URL expiry falls back", "10800", defaultAlbumTTL},
+		// The TTL is only a ceiling — the cache re-fetches an album before its
+		// signed URLs expire whatever it says — so a long one is taken as is.
+		{"a long ceiling is used", "10800", 3 * time.Hour},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

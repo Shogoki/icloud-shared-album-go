@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strconv"
+	"time"
 
 	icloudalbum "github.com/Shogoki/icloud-shared-album-go"
 	"github.com/gorilla/mux"
@@ -18,7 +20,8 @@ import (
 // image arrives. Small*/Medium* are the dimensions the proxy's resized
 // "small" and "medium" sizes come out at, so a page can size them without
 // fetching them. FullImageURL and ThumbnailURL remain the signed iCloud URLs
-// and stop working roughly three hours after this response is produced.
+// and stop working minutes after this response is produced — twenty minutes
+// after iCloud issued them, as observed.
 type ImageResponse struct {
 	PhotoGUID    string `json:"photoGuid"`
 	Caption      string `json:"caption"`
@@ -150,12 +153,25 @@ func (s *server) getAlbumHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	// The signed URLs in this payload outlive the response by about three
-	// hours, so a short shared cache is safe and spares iCloud the repeat.
-	w.Header().Set("Cache-Control", "public, max-age=900")
+	w.Header().Set("Cache-Control", albumCacheControl(response.Photos, time.Now()))
 	if err := json.NewEncoder(w).Encode(toImageResponses(response.Photos)); err != nil {
 		log.Printf("album %s: encoding response: %v", key, err)
 	}
+}
+
+// albumMaxAge is how long the album endpoint's response may be cached when
+// nothing shorter is called for.
+const albumMaxAge = 15 * time.Minute
+
+// albumCacheControl lets a cache keep the album response for albumMaxAge, but
+// no longer than its signed URLs have left before urlExpiryMargin: a copy used
+// at the end of its max-age still lists URLs with that much life in them.
+func albumCacheControl(photos []icloudalbum.Image, now time.Time) string {
+	maxAge := albumMaxAge
+	if urlsExpire, ok := urlExpiry(photos); ok {
+		maxAge = min(maxAge, max(0, urlsExpire.Sub(now)-urlExpiryMargin))
+	}
+	return "public, max-age=" + strconv.Itoa(int(maxAge/time.Second))
 }
 
 // errorCacheControl keeps every error response out of every cache. An error

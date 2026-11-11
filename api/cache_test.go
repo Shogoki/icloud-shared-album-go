@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -228,5 +229,89 @@ func TestCompleteAlbums(t *testing.T) {
 				t.Errorf("fetched %d times, want %d", got, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// signedAlbum is an album of one photo whose two URLs expire at the given
+// times, the way iCloud states it: Unix seconds in the "e" parameter.
+func signedAlbum(thumbExpires, fullExpires time.Time) *icloudalbum.Response {
+	url := func(name string, e time.Time) *string {
+		return ptr(fmt.Sprintf("https://cvws.icloud-content.com/S/x/%s?v=1&e=%d&s=sig", name, e.Unix()))
+	}
+	return &icloudalbum.Response{Photos: []icloudalbum.Image{photo("a", time.Unix(100, 0), map[string]icloudalbum.Derivative{
+		"342":  {FileSize: 1_000, URL: url("thumb.JPG", thumbExpires)},
+		"2048": {FileSize: 900_000, URL: url("full.JPG", fullExpires)},
+	})}}
+}
+
+// iCloud's URLs were assumed to live three hours and cached for one, but they
+// live twenty minutes: for forty minutes of every hour, every image of the
+// album was a 401 from iCloud and a 502 from the proxy. The cache must let an
+// album go before its first URL expires, whatever the TTL says.
+func TestAlbumCacheExpiresBeforeItsURLs(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var calls atomic.Int32
+	c := newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+		calls.Add(1)
+		return signedAlbum(now.Add(20*time.Minute), now.Add(25*time.Minute)), nil
+	})
+	c.now = func() time.Time { return now }
+
+	start := now
+	c.get("TOKEN")
+	now = start.Add(20*time.Minute - urlExpiryMargin - time.Second)
+	c.get("TOKEN")
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetched %d times while every URL had more than the margin left, want 1", got)
+	}
+
+	now = start.Add(20*time.Minute - urlExpiryMargin + time.Second)
+	c.get("TOKEN")
+	if got := calls.Load(); got != 2 {
+		t.Errorf("fetched %d times once the earliest URL was within the margin, want 2", got)
+	}
+}
+
+// URLs that arrive with less than the margin left, or already expired, must
+// not make every request an iCloud lookup.
+func TestAlbumCacheKeepsNearlyExpiredAlbumsBriefly(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	var calls atomic.Int32
+	c := newAlbumCache(time.Hour, func(string) (*icloudalbum.Response, error) {
+		calls.Add(1)
+		return signedAlbum(now.Add(-time.Minute), now.Add(-time.Minute)), nil
+	})
+	c.now = func() time.Time { return now }
+
+	start := now
+	c.get("TOKEN")
+	now = start.Add(albumErrorTTL - time.Second)
+	c.get("TOKEN")
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("fetched %d times within albumErrorTTL, want 1", got)
+	}
+	now = start.Add(albumErrorTTL + time.Second)
+	c.get("TOKEN")
+	if got := calls.Load(); got != 2 {
+		t.Errorf("fetched %d times after albumErrorTTL, want 2", got)
+	}
+}
+
+func TestURLExpiry(t *testing.T) {
+	early, late := time.Unix(1_800_000_000, 0), time.Unix(1_800_000_600, 0)
+
+	got, ok := urlExpiry(signedAlbum(late, early).Photos)
+	if !ok || !got.Equal(early) {
+		t.Errorf("urlExpiry = %s, %v; want the earliest, %s", got, ok, early)
+	}
+
+	// URLs without an expiry, or no URL at all, state nothing.
+	unstated := []icloudalbum.Image{photo("a", time.Unix(100, 0), map[string]icloudalbum.Derivative{
+		"342":  {URL: ptr("https://cvws.icloud-content.com/S/x/thumb.JPG?v=1")},
+		"2048": {URL: nil},
+		"bad":  {URL: ptr("https://cvws.icloud-content.com/S/x/full.JPG?e=soon")},
+	})}
+	if got, ok := urlExpiry(unstated); ok {
+		t.Errorf("urlExpiry = %s, want no expiry", got)
 	}
 }
